@@ -1,0 +1,384 @@
+# Project 5: On-Premises to AWS Cloud Connectivity via Site-to-Site VPN over Transit Gateway
+
+A production-grade Site-to-Site VPN architecture connecting a simulated on-premises network to AWS cloud using IPSec/IKEv2, libreswan, Virtual Tunnel Interface (VTI), and AWS Transit Gateway. Traffic flows privately and encrypted between two completely isolated networks — proving enterprise-grade hybrid cloud connectivity.
+
+**Region:** us-east-1  
+**On-Prem VPC CIDR:** 192.168.0.0/16  
+**AWS VPC CIDR:** 10.0.0.0/16  
+
+---
+
+## Architecture Diagram
+
+```
+                    ┌─────────────────────────────────────────────────┐
+                    │           On-Premises (Simulated)               │
+                    │           192.168.0.0/16                        │
+                    │                                                 │
+                    │  ┌─── us-east-1a ──────────┐                   │
+                    │  │  public-subnet           │                   │
+                    │  │  192.168.1.0/24          │                   │
+                    │  │  ┌───────────────────┐   │                   │
+                    │  │  │  StrongSwan EC2   │   │                   │
+                    │  │  │  (VPN Router)     │   │                   │
+                    │  │  │  Public IP        │   │                   │
+                    │  │  │  vti1 interface   │   │                   │
+                    │  │  └───────────────────┘   │                   │
+                    │  └─────────────────────────┘                   │
+                    │                                                 │
+                    │  ┌─── us-east-1b ──────────┐                   │
+                    │  │  private-subnet          │                   │
+                    │  │  192.168.2.0/24          │                   │
+                    │  │  ┌───────────────────┐   │                   │
+                    │  │  │  On-Prem Private  │   │                   │
+                    │  │  │  EC2              │   │                   │
+                    │  │  │  192.168.2.149    │   │                   │
+                    │  │  └───────────────────┘   │                   │
+                    │  └─────────────────────────┘                   │
+                    └─────────────────────────────────────────────────┘
+                                      │
+                          IPSec VTI Tunnel (IKEv2)
+                          AES-128 Encrypted
+                          Over Public Internet
+                                      │
+                    ┌─────────────────────────────────────────────────┐
+                    │              Transit Gateway                    │
+                    │              project5-tgw                       │
+                    │                                                 │
+                    │  TGW Route Table:                               │
+                    │  192.168.0.0/16 → VPN attachment               │
+                    │  10.0.0.0/16    → VPC attachment               │
+                    └─────────────────────────────────────────────────┘
+                                      │
+                    ┌─────────────────────────────────────────────────┐
+                    │              AWS Cloud                          │
+                    │              10.0.0.0/16                        │
+                    │                                                 │
+                    │  ┌─── us-east-1a ──────────┐                   │
+                    │  │  private-subnet          │                   │
+                    │  │  10.0.1.0/24             │                   │
+                    │  │  ┌───────────────────┐   │                   │
+                    │  │  │  AWS Private EC2  │   │                   │
+                    │  │  │  10.0.1.207       │   │                   │
+                    │  │  │  No public IP     │   │                   │
+                    │  │  └───────────────────┘   │                   │
+                    │  └─────────────────────────┘                   │
+                    │                                                 │
+                    │  ┌─── us-east-1b ──────────┐                   │
+                    │  │  public-subnet           │                   │
+                    │  │  10.0.2.0/24             │                   │
+                    │  │  ┌───────────────────┐   │                   │
+                    │  │  │  Bastion EC2      │   │                   │
+                    │  │  │  Public IP        │   │                   │
+                    │  │  └───────────────────┘   │                   │
+                    │  └─────────────────────────┘                   │
+                    └─────────────────────────────────────────────────┘
+
+PROOF OF CONNECTIVITY:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+On-Prem → AWS: 192.168.2.149 → ping → 10.0.1.207 ✅
+AWS → On-Prem: 10.0.1.207   → ping → 192.168.2.149 ✅
+Zero packet loss. Both directions. Fully encrypted.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+---
+
+## What I Built & Why
+
+### Why Simulate On-Premises with a VPC?
+In the real world, on-premises means a physical data center with Cisco/Fortinet routers. Since we don't have a physical data center, we simulate it using a second VPC (`192.168.0.0/16`) in the same region. The StrongSwan EC2 acts as the physical router. Everything else — the VPN tunnel, encryption, routing — is identical to a real enterprise setup.
+
+### On-Premises VPC — project5-onprem-vpc (192.168.0.0/16)
+
+**public-subnet (192.168.1.0/24):** Houses the StrongSwan VPN router EC2. Must be public because the router needs a public IP for the VPN tunnel endpoint — just like a real office router gets a public IP from the ISP.
+
+**private-subnet (192.168.2.0/24):** Houses the simulated office server. No public IP — just like real servers in a corporate network are never directly exposed to the internet.
+
+### AWS Cloud VPC — project5-aws-vpc (10.0.0.0/16)
+
+**private-subnet (10.0.1.0/24):** Houses the AWS private EC2 — the cloud app server. Only reachable via VPN tunnel from on-premises or via bastion. Zero public exposure.
+
+**public-subnet (10.0.2.0/24):** Houses the bastion EC2 for management access.
+
+### Why Different CIDRs?
+`192.168.0.0/16` and `10.0.0.0/16` must never overlap. When the Transit Gateway receives a packet destined for `10.0.1.207`, it needs to unambiguously know "this goes to the AWS VPC" not "this goes to on-prem". Overlapping CIDRs would make routing impossible.
+
+### Transit Gateway — project5-tgw
+The central hub that connects the VPN tunnel and the AWS VPC. Acts like a managed router — when traffic arrives from the VPN, it checks the route table and forwards to the VPC. When traffic from the VPC is destined for on-prem, it forwards through the VPN attachment.
+
+```
+TGW Route Table:
+192.168.0.0/16 → VPN attachment (on-prem traffic)
+10.0.0.0/16    → VPC attachment (AWS traffic, auto-propagated)
+```
+
+### Customer Gateway (CGW) — project5-cgw
+Not a physical device — just an AWS configuration object that tells AWS "my on-prem router lives at this public IP (3.239.109.164)". AWS uses this to know where to send the VPN tunnel. In real life, you put your office router's public IP here.
+
+### Site-to-Site VPN — project5-vpn (Static Routing)
+Creates two encrypted IPSec tunnels between AWS and StrongSwan. AWS always creates two tunnels for redundancy — if one AWS endpoint fails, traffic shifts to the second automatically. We used static routing because we have fixed CIDRs that never change. Dynamic BGP routing would be used when subnets change frequently.
+
+```
+Tunnel 1: StrongSwan → 3.211.251.140 (AWS endpoint 1) ✅ Active
+Tunnel 2: StrongSwan → 3.230.7.122  (AWS endpoint 2) ✅ Standby
+```
+
+### StrongSwan (libreswan) — The VPN Router
+libreswan is open source VPN software implementing IPSec/IKEv2. Installed on the StrongSwan EC2 and configured to establish encrypted tunnels to AWS. Acts as the software equivalent of a physical Cisco ASA firewall.
+
+**Why Source/Destination Check must be disabled:**
+By default AWS checks that every EC2 only sends/receives traffic for its own IP. StrongSwan needs to forward packets on behalf of the entire `192.168.0.0/16` network. Disabling this check allows it to act as a router for all on-prem traffic.
+
+### Virtual Tunnel Interface (VTI) — vti1
+This was the critical piece that makes everything work. A VTI is a virtual network interface created by libreswan when the tunnel comes up. Think of it like a dedicated virtual pipe directly to AWS.
+
+```
+Without VTI (wrong approach):
+Packet → Linux kernel → "where do I send this?"
+→ routing table ambiguity → dropped ❌
+
+With VTI (correct approach):
+Packet → vti1 interface → libreswan encrypts automatically
+→ sends through IPSec tunnel to AWS ✅
+```
+
+---
+
+## libreswan Configuration Files
+
+### /etc/ipsec.d/aws-vpn.conf
+```
+conn tunnel1
+    authby=secret          # authenticate using pre-shared key
+    auto=start             # start tunnel automatically on boot
+    left=%defaultroute     # our side — auto-detect our IP
+    leftid=3.239.109.164   # identify ourselves to AWS as this IP (must match CGW)
+    right=3.211.251.140    # AWS tunnel endpoint IP
+    type=tunnel            # full tunnel mode — encrypt entire packets
+    ikelifetime=8h         # Phase 1 session duration before re-auth
+    keylife=1h             # Phase 2 encryption key rotation interval
+    phase2alg=aes128-sha1;modp2048  # encryption for data tunnel
+    ike=aes128-sha1;modp2048        # encryption for IKE negotiation
+    keyingtries=%forever   # never stop trying to reconnect if tunnel drops
+    keyexchange=ike        # use IKE protocol for key exchange
+    leftsubnet=192.168.0.0/16   # on-prem network behind StrongSwan
+    rightsubnet=10.0.0.0/16     # AWS network behind VPN endpoint
+    dpddelay=10            # send keepalive every 10 seconds
+    dpdtimeout=30          # declare tunnel dead after 30s no response
+    dpdaction=restart_by_peer  # auto-restart if tunnel declared dead
+```
+
+### /etc/ipsec.d/aws-vpn.secrets
+```
+3.239.109.164 3.211.251.140 : PSK "your-psk-here"
+# Format: OUR_IP AWS_IP : PSK "password"
+# Both sides must have the same PSK — AWS generated it automatically
+# If PSK doesn't match → tunnel authentication fails → no connection
+```
+
+---
+
+## Manual Commands Explained
+
+### On StrongSwan EC2
+
+```bash
+sudo sysctl -w net.ipv4.ip_forward=1
+```
+Enables Linux IP forwarding. By default Linux only processes packets destined for itself. StrongSwan needs to forward packets on behalf of the entire 192.168.0.0/16 network. Without this, all forwarded packets are silently dropped.
+
+```bash
+echo "net.ipv4.ip_forward = 1" | sudo tee -a /etc/sysctl.conf
+```
+Makes IP forwarding permanent across reboots. The first command sets it now, this command writes it to the config file.
+
+```bash
+sudo ip tunnel add vti1 mode vti local 192.168.1.148 remote 3.211.251.140 key 0xffffffff
+```
+Creates the Virtual Tunnel Interface. Breaking it down:
+- `ip tunnel add vti1` — create a new tunnel interface named vti1
+- `mode vti` — Virtual Tunnel Interface mode (not GRE, not IPIP)
+- `local 192.168.1.148` — our StrongSwan private IP (inside the tunnel)
+- `remote 3.211.251.140` — AWS VPN endpoint IP (tunnel destination)
+- `key 0xffffffff` — must match the xfrm policy mark so kernel knows which SA to use
+
+```bash
+sudo ip link set vti1 up
+```
+Brings the vti1 interface up. Like plugging in a network cable — creates the interface but doesn't activate it until this command.
+
+```bash
+sudo sysctl -w net.ipv4.conf.vti1.disable_policy=1
+```
+Disables xfrm policy checks on vti1. Without this, the kernel applies double encryption — once from the VTI and once from the xfrm policy — causing packets to be dropped.
+
+```bash
+sudo sysctl -w net.ipv4.conf.vti1.rp_filter=0
+```
+Disables reverse path filtering on vti1. RP filter checks if incoming packets arrived on the "correct" interface. For VPN traffic this check fails because packets arrive encrypted on enX0 but are expected on vti1 — disabling prevents false drops.
+
+```bash
+sudo ip route add 10.0.0.0/16 dev vti1
+```
+Tells the Linux kernel: "any packet destined for 10.0.0.0/16 (AWS network) should go through vti1". Once vti1 receives the packet, libreswan automatically encrypts it and sends it through the IPSec tunnel to AWS. This is the key routing command that makes everything work.
+
+### On On-Premises Private EC2
+
+```bash
+sudo ip route add 10.0.0.0/16 via 192.168.2.1 dev enX0
+```
+Tells the on-prem private EC2: "send all AWS-bound traffic (10.0.0.0/16) to 192.168.2.1 (the subnet gateway) via enX0". The subnet gateway then forwards it to StrongSwan (handled by the VPC route table we configured). Without this, the private EC2 has no path to reach AWS — packets go to default gateway and get lost.
+
+### On AWS Private EC2
+
+```bash
+sudo ip route add 192.168.0.0/16 via 10.0.1.1 dev enX0
+```
+Tells the AWS private EC2: "send all on-prem-bound traffic (192.168.0.0/16) to 10.0.1.1 (the subnet gateway)". The subnet gateway forwards it to TGW (handled by the AWS private route table). Without this, reply packets from AWS have no path back to on-prem.
+
+---
+
+## Why These Routes Were Added Manually
+
+In production these routes would be permanent — written to the OS network config files or injected via User Data on launch. In this lab we added them manually via terminal for two reasons:
+
+1. The OS-level route and the VPC route table are two different layers — AWS route table tells AWS where to send packets at the network level, but the EC2's Linux kernel also needs its own routing table updated.
+
+2. For StrongSwan, the vti-up-down script should add the route automatically when the tunnel comes up, but a mark value mismatch between libreswan and the kernel xfrm policy prevented the script from running correctly. We created vti1 manually with the correct mark (`0xffffffff`) to match the xfrm policy.
+
+---
+
+## Traffic Flow — End to End
+
+### On-Prem Private EC2 → AWS Private EC2
+```
+192.168.2.149 sends packet to 10.0.1.207
+    ↓
+OS route: 10.0.0.0/16 via 192.168.2.1 (gateway)
+    ↓
+VPC route table (project5-onprem-private-rt):
+10.0.0.0/16 → StrongSwan EC2 instance
+    ↓
+StrongSwan receives packet on enX0
+    ↓
+OS route: 10.0.0.0/16 dev vti1
+Packet enters vti1 interface
+    ↓
+libreswan intercepts, encrypts with AES-128
+Sends ESP packet to AWS endpoint 3.211.251.140
+    ↓
+Transit Gateway receives encrypted packet
+Decrypts via VPN attachment
+Checks TGW route table:
+10.0.0.0/16 → VPC attachment ✅
+    ↓
+AWS Private EC2 (10.0.1.207) receives ping ✅
+```
+
+### AWS Private EC2 → On-Prem Private EC2
+```
+10.0.1.207 sends reply to 192.168.2.149
+    ↓
+OS route: 192.168.0.0/16 via 10.0.1.1 (gateway)
+    ↓
+VPC route table (project5-aws-private-rt):
+192.168.0.0/16 → Transit Gateway
+    ↓
+TGW checks route table:
+192.168.0.0/16 → VPN attachment ✅
+    ↓
+Encrypts and sends to StrongSwan (3.239.109.164)
+    ↓
+StrongSwan decrypts, delivers to 192.168.2.149 ✅
+```
+
+---
+
+## Results — Proof of Connectivity
+
+### ✅ Both VPN Tunnels UP on AWS Console
+```
+Tunnel 1: 3.211.251.140 → UP ✅
+Tunnel 2: 3.230.7.122   → UP ✅
+```
+
+### ✅ VTI Interface Active on StrongSwan
+```bash
+ip addr show vti1
+# vti1@NONE: <POINTOPOINT,NOARP,UP,LOWER_UP>
+# link/ipip 192.168.1.148 peer 3.211.251.140
+```
+
+### ✅ Route Through Tunnel
+```bash
+ip route show | grep vti1
+# 10.0.0.0/16 dev vti1 scope link
+```
+
+### ✅ Ping: On-Prem Private → AWS Private
+```bash
+# From 192.168.2.149:
+ping 10.0.1.207 -c 5
+# 64 bytes from 10.0.1.207: icmp_seq=1 ttl=124 time=2.22ms
+# 64 bytes from 10.0.1.207: icmp_seq=2 ttl=124 time=2.28ms
+# 64 bytes from 10.0.1.207: icmp_seq=3 ttl=124 time=2.08ms
+# 64 bytes from 10.0.1.207: icmp_seq=4 ttl=124 time=2.42ms
+# 64 bytes from 10.0.1.207: icmp_seq=5 ttl=124 time=2.15ms
+# 0% packet loss ✅
+```
+
+### ✅ Ping: AWS Private → On-Prem Private
+```bash
+# From 10.0.1.207:
+ping 192.168.2.149 -c 5
+# 64 bytes from 192.168.2.149 ✅
+# 0% packet loss ✅
+```
+
+---
+
+## Key Concepts
+
+**IPSec vs regular VPN**
+IPSec operates at Layer 3 (network layer) — it encrypts entire IP packets including headers. This means ANY protocol (TCP, UDP, ICMP) is automatically encrypted. Unlike TLS which only works for specific applications, IPSec protects all traffic transparently.
+
+**IKEv2 vs IKEv1**
+IKEv2 (Internet Key Exchange version 2) is faster to establish, more reliable when network changes occur, and has built-in NAT traversal. AWS recommends IKEv2 for all new VPN connections.
+
+**Why two tunnels?**
+AWS creates two tunnels per VPN connection for high availability. Each tunnel terminates on a different AWS physical device in different AZs. If one device fails, traffic automatically shifts to the second tunnel — zero manual intervention.
+
+**VTI vs xfrm policy mode**
+xfrm policy mode encrypts traffic based on source/destination IP matching — no virtual interface. VTI creates an actual network interface (vti1) which makes routing explicit and predictable. VTI is the AWS-recommended approach for Linux because it integrates cleanly with the Linux routing table.
+
+**Static vs Dynamic (BGP) routing**
+Static routing: you manually define which CIDRs are behind each VPN endpoint. Simple, predictable, works perfectly for fixed networks.
+Dynamic BGP routing: routers automatically exchange route information. Essential for large enterprises with hundreds of changing subnets. Requires BGP software (FRR, quagga) running on the VPN device.
+
+---
+
+## Mistakes Made & Fixed
+
+### 1. mark value mismatch
+Initial config used `mark=100/0xffffffff` but the xfrm policy was using `mark=0xffffffff/0xffffffff`. Result: vti1 was created but packets were not being encrypted. Fixed by creating vti1 manually with `key 0xffffffff` to match the xfrm policy exactly.
+
+### 2. Bastion in wrong subnet
+Launched bastion EC2 in private subnet instead of public subnet. You cannot change EC2 subnet after launch. Fixed by terminating and relaunching in correct subnet.
+
+### 3. Missing OS-level routes
+VPC route tables handle AWS-level routing but each EC2's Linux kernel needs its own routing table updated. Had to manually add `ip route add` commands on private EC2s to give them paths to the other network.
+
+---
+
+## Cleanup Order
+1. Terminate all 4 EC2 instances
+2. Delete Site-to-Site VPN connection
+3. Delete Customer Gateway
+4. Delete TGW VPC attachment
+5. Delete Transit Gateway
+6. Delete route tables (disassociate subnets first)
+7. Detach + delete both IGWs
+8. Delete all subnets
+9. Delete both VPCs
+10. Delete key pair
